@@ -2,6 +2,8 @@
 
 (require '[clojure.string :as str])
 
+;; These prompts are verbatim copies from dzhng/deep-research
+
 ;; System Prompt
 (defn system-prompt []
   (let [now (.toString (java.time.Instant/now))]
@@ -15,6 +17,7 @@
          "  - Mistakes erode my trust, so be accurate and thorough.\n"
          "  - Provide detailed explanations, I'm comfortable with lots of detail.\n"
          "  - Value good arguments over authorities, the source is irrelevant.\n"
+         "  - When asked to create a list, do not include a sentence like 'Here are the learnings:' or 'Here are the questions:'.\n"
          ;; "  - Consider new technologies and contrarian ideas, not just the conventional wisdom.\n"
          "  - You may use high levels of speculation or prediction, just flag it for me.")))
 
@@ -64,44 +67,13 @@
        "Return a maximum of " num-questions " questions, but feel free to return less if the original query is clear: "
        "<query>" query "</query>"))
 
-;; Example usage:
-(comment
-  ;; System prompt
-  (println (system-prompt))
-
-  ;; Research queries prompt
-  (println (queries-prompt
-            {:query "What are the latest developments in quantum computing?"
-             :num-queries 3
-             :learnings ["IBM announced new 1000-qubit processor"
-                         "Google achieved quantum supremacy in 2023"]}))
-
-  ;; Research results processing prompt
-  (println (research-results-prompt
-            {:query "quantum computing developments"
-             :num-learnings 3
-             :contents ["IBM released new quantum processor"
-                        "Google announces breakthrough"]}))
-
-  ;; Final report prompt
-  (println (final-report-prompt
-            {:prompt "Analyze quantum computing progress"
-             :learnings ["IBM achievement"
-                         "Google breakthrough"
-                         "Microsoft advances"]}))
-
-  ;; Feedback prompt
-  (println (feedback-prompt
-            {:query "Tell me about quantum computing"
-             :num-questions 3})))
-
 (require '[babashka.cli :as cli]
          '[babashka.process :as p]
-         '[clojure.string :as str]
          '[babashka.fs :as fs])
 
 (def ^:dynamic *verbose* false)
 (def ^:dynamic *output-dir* nil)
+(def ^:dynamic *model* nil)
 
 (defn log
   "Log a message when verbose mode is enabled"
@@ -121,6 +93,7 @@
         (str/replace #"\s+" "-")
         (str/replace #"-+" "-")
         (shorten)
+        (str/replace #"^-" "")
         (str/trim))))
 
 (defn get-first-line
@@ -148,14 +121,19 @@
   ([opts prompt]
    (let [result (-> (apply p/process
                            {:out :string
+                            :err :string
                             :in prompt}
                            (cond-> ["llm"]
-                             true (conj "-m" (or (:model opts) default-model))
+                             true (conj "-m" (or *model*
+                                                 (:model opts)
+                                                 default-model))
                              true (conj "-s" (system-prompt))
                              (:system opts) (conj "-s" (:system opts))))
-                    deref
-                    :out)]
-     result)))
+                    deref)]
+     (when-not (zero? (:exit result))
+       (println (:err result))
+       (System/exit 1))
+     (:out result))))
 
 (defn generate-queries
   "Generate search queries based on the input and previous learnings"
@@ -248,6 +226,8 @@
                  :desc "Show this help message"}
           :verbose {:coerce :boolean
                     :desc "Enable verbose logging"}
+          :model {:desc "LLM model to use (via `llm`)"
+                  :default "sonar-pro"}
           :query {:desc "Research query to investigate"}
           :depth {:coerce :long
                   :default 2
@@ -261,7 +241,7 @@
                                :ex-msg "Breadth must be between 2 and 10"}}
           :output-dir {:default "research-output"
                        :desc "Directory to store research outputs (will be created if it doesn't exist)"}}
-   :order [:help :query :depth :breadth :output-dir :verbose]
+   :order [:help :query :model :depth :breadth :output-dir :verbose]
    :description "Deep Research Assistant - Recursively research any topic using LLMs
 
 This tool performs iterative research on a given topic by:
@@ -274,15 +254,17 @@ This tool performs iterative research on a given topic by:
 All intermediate results and the final report are saved as markdown files."})
 
 (defn -main [& args]
-  (let [{:keys [query depth breadth verbose output-dir] :as opts} (cli/parse-opts args cli-options)]
+  (let [{:keys [query depth breadth verbose output-dir model] :as opts} (cli/parse-opts args cli-options)]
     (if (or (:help opts)
             (not query))
       (do
         (println (:description cli-options) "\n")
         (println (cli/format-opts cli-options)))
       (binding [*verbose* verbose
-                *output-dir* output-dir]
+                *output-dir* output-dir
+                *model* model]
         (log "Starting research with depth:" depth "breadth:" breadth)
+        (log "Using model:" (or model default-model))
         (log "Saving output to:" (str output-dir))
         (let [results (iterative-research query depth breadth [])
               report (generate-final-report query depth breadth (:learnings results))]
